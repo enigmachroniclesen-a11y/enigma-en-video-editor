@@ -1,10 +1,12 @@
 import os
 import re
 import requests
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from moviepy.editor import ImageClip, AudioFileClip, TextClip, CompositeVideoClip
+from moviepy.editor import ImageClip, AudioFileClip, CompositeVideoClip
 
 app = FastAPI()
 
@@ -12,6 +14,22 @@ class RenderRequest(BaseModel):
     image_url: str
     audio_url: str
     script_text: str = ""
+
+def create_subtitle_image(text, size=(900, 200)):
+    """Génère une image transparente avec le texte des sous-titres centré."""
+    img = Image.new('RGBA', size, (0, 0, 0, 160)) # Fond semi-transparent
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.load_default()
+    
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+    
+    x = (size[0] - text_w) / 2
+    y = (size[1] - text_h) / 2
+    
+    draw.text((x, y), text, fill=(255, 255, 255, 255), font=font)
+    return np.array(img)
 
 def get_direct_drive_url(url: str) -> str:
     """Convertit un lien de partage Google Drive en lien de téléchargement direct."""
@@ -21,10 +39,14 @@ def get_direct_drive_url(url: str) -> str:
         return f"https://drive.google.com/uc?export=download&id={file_id}"
     return url
 
+@app.get("/")
+def home():
+    return {"status": "ok", "message": "Serveur de montage vidéo opérationnel !"}
+
 @app.post("/render")
 def render_video(data: RenderRequest):
     try:
-        # 1. Téléchargement de l'image et de l'audio
+        # 1. Téléchargement des médias
         img_direct_url = get_direct_drive_url(data.image_url)
         audio_direct_url = get_direct_drive_url(data.audio_url)
 
@@ -39,11 +61,10 @@ def render_video(data: RenderRequest):
         with open("temp_audio.mp3", "wb") as f:
             f.write(audio_res.content)
 
-        # 2. Chargement des clips
+        # 2. Préparation des éléments
         audio_clip = AudioFileClip("temp_audio.mp3")
         duration = audio_clip.duration
 
-        # Format 9:16 vertical (1080x1920) pour Shorts / TikTok
         image_clip = (ImageClip("temp_image.jpg")
                       .set_duration(duration)
                       .resize(height=1920)
@@ -51,7 +72,7 @@ def render_video(data: RenderRequest):
 
         clips = [image_clip]
 
-        # 3. Ajout des sous-titres animés au centre (si du texte est fourni)
+        # 3. Génération des sous-titres
         if data.script_text:
             words = data.script_text.split()
             chunk_size = 4
@@ -60,15 +81,14 @@ def render_video(data: RenderRequest):
             if chunks:
                 time_per_chunk = duration / len(chunks)
                 for idx, chunk in enumerate(chunks):
-                    txt_clip = (TextClip(chunk, fontsize=48, color='white', font='Arial-Bold',
-                                         method='caption', size=(900, None),
-                                         bg_color='black')
+                    sub_arr = create_subtitle_image(chunk)
+                    sub_clip = (ImageClip(sub_arr)
                                 .set_start(idx * time_per_chunk)
                                 .set_duration(time_per_chunk)
-                                .set_position(('center', 'center')))
-                    clips.append(txt_clip)
+                                .set_position(('center', 1400))) # Placés vers le bas
+                    clips.append(sub_clip)
 
-        # 4. Assemblage final
+        # 4. Rendu final
         final_video = CompositeVideoClip(clips, size=(1080, 1920)).set_audio(audio_clip)
         output_filename = "output.mp4"
         final_video.write_videofile(
@@ -80,7 +100,6 @@ def render_video(data: RenderRequest):
             remove_temp=True
         )
 
-        # Nettoyage
         audio_clip.close()
         final_video.close()
 
