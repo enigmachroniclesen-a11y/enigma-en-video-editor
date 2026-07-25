@@ -1,6 +1,6 @@
 import PIL.Image
 if not hasattr(PIL.Image, 'ANTIALIAS'):
-PIL.Image.ANTIALIAS = PIL.Image.Resampling.LANCZOS
+PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
 import os
 import re
 import requests
