@@ -3,4 +3,4 @@ uvicorn
 requests
 moviepy==1.0.3
 pydantic
-Pillow==9.5.0
+Pillow
