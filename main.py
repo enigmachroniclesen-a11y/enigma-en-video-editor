@@ -28,7 +28,7 @@ class RenderRequest(BaseModel):
     webhook_url: str | None = None
 
 # --- FONCTIONS UTILITAIRES ---
-def create_subtitle_image(text, size=(900, 200)):
+def create_subtitle_image(text, size=(600, 150)):
     """Génère une image transparente avec le texte des sous-titres centré."""
     img = Image.new('RGBA', size, (0, 0, 0, 160)) # Fond semi-transparent
     draw = ImageDraw.Draw(img)
@@ -85,23 +85,31 @@ def process_video_task(data: RenderRequest, host_url: str):
 
         # 1. Téléchargement sécurisé des médias
         print("Téléchargement de l'image...", flush=True)
-        download_file_from_google_drive(data.image_url, "temp_image.jpg")
+        download_file_from_google_drive(data.image_url, "temp_image_raw.jpg")
         
         print("Téléchargement de l'audio...", flush=True)
         download_file_from_google_drive(data.audio_url, "temp_audio.mp3")
 
-        # 2. Préparation des éléments
+        # 2. Redimensionnement de l'image AVANT MoviePy pour économiser la RAM
+        print("Optimisation de l'image pour la RAM...", flush=True)
+        with Image.open("temp_image_raw.jpg") as img:
+            img = img.convert("RGB")
+            img.thumbnail((720, 1280))
+            img.save("temp_image.jpg", "JPEG", quality=85)
+
+        # 3. Préparation des éléments
         audio_clip = AudioFileClip("temp_audio.mp3")
         duration = audio_clip.duration
 
+        # Format 720x1280 (optimisé pour ne pas dépasser 512 MB RAM)
         image_clip = (ImageClip("temp_image.jpg")
                       .set_duration(duration)
-                      .resize(height=1920)
+                      .resize(height=1280)
                       .set_position("center"))
 
         clips = [image_clip]
 
-        # 3. Génération des sous-titres
+        # 4. Génération des sous-titres
         if data.script_text:
             print("Génération des sous-titres...", flush=True)
             words = data.script_text.split()
@@ -111,16 +119,16 @@ def process_video_task(data: RenderRequest, host_url: str):
             if chunks:
                 time_per_chunk = duration / len(chunks)
                 for idx, chunk in enumerate(chunks):
-                    sub_arr = create_subtitle_image(chunk)
+                    sub_arr = create_subtitle_image(chunk, size=(600, 150))
                     sub_clip = (ImageClip(sub_arr)
                                 .set_start(idx * time_per_chunk)
                                 .set_duration(time_per_chunk)
-                                .set_position(('center', 1400)))
+                                .set_position(('center', 950)))
                     clips.append(sub_clip)
 
-        # 4. Rendu final
+        # 5. Rendu final (720x1280, ultra-léger en mémoire)
         print("Rendu final avec MoviePy...", flush=True)
-        final_video = CompositeVideoClip(clips, size=(1080, 1920)).set_audio(audio_clip)
+        final_video = CompositeVideoClip(clips, size=(720, 1280)).set_audio(audio_clip)
         output_filename = "output.mp4"
         
         final_video.write_videofile(
@@ -128,9 +136,10 @@ def process_video_task(data: RenderRequest, host_url: str):
             fps=24,
             codec="libx264",
             audio_codec="aac",
+            preset="ultrafast",  # Réduit fortement la consommation RAM
             temp_audiofile="temp-audio.m4a",
             remove_temp=True,
-            threads=1  # Limite l'usage CPU/RAM pour éviter les surcharges
+            threads=1  # Limite l'usage CPU/RAM
         )
 
         audio_clip.close()
@@ -138,7 +147,7 @@ def process_video_task(data: RenderRequest, host_url: str):
 
         print("=== RENDU TERMINE AVEC SUCCES ===", flush=True)
 
-        # 5. Envoi du lien vers Make via Webhook
+        # 6. Envoi du lien vers Make via Webhook
         if data.webhook_url:
             download_link = f"{host_url.rstrip('/')}/download"
             requests.post(data.webhook_url, json={
