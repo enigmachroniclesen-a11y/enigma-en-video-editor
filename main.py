@@ -5,16 +5,17 @@ if not hasattr(PIL.Image, 'ANTIALIAS'):
 import os
 import re
 import requests
+import traceback
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from moviepy.editor import ImageClip, AudioFileClip, CompositeVideoClip
 
 app = FastAPI()
 
-# --- HEALTH CHECK (Résout le problème 405 / Cold Start sur Render) ---
+# --- HEALTH CHECK ---
 @app.api_route("/", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "ok", "message": "Serveur de montage vidéo opérationnel !"}
@@ -24,7 +25,7 @@ class RenderRequest(BaseModel):
     image_url: str
     audio_url: str
     script_text: str = ""
-    webhook_url: str | None = None  # URL du Webhook Make pour la notification de fin
+    webhook_url: str | None = None
 
 # --- FONCTIONS UTILITAIRES ---
 def create_subtitle_image(text, size=(900, 200)):
@@ -43,31 +44,51 @@ def create_subtitle_image(text, size=(900, 200)):
     draw.text((x, y), text, fill=(255, 255, 255, 255), font=font)
     return np.array(img)
 
-def get_direct_drive_url(url: str) -> str:
-    """Convertit un lien de partage Google Drive en lien de téléchargement direct."""
+def download_file_from_google_drive(url: str, destination: str):
+    """Télécharge un fichier Google Drive en gérant les fichiers volumineux et confirmations."""
     match = re.search(r'/d/([a-zA-Z0-9_-]+)', url) or re.search(r'id=([a-zA-Z0-9_-]+)', url)
-    if match:
-        file_id = match.group(1)
-        return f"https://drive.google.com/uc?export=download&id={file_id}"
-    return url
+    if not match:
+        # Si ce n'est pas un lien Google Drive, téléchargement direct simple
+        res = requests.get(url, stream=True)
+        res.raise_for_status()
+        with open(destination, "wb") as f:
+            for chunk in res.iter_content(chunk_size=8192):
+                f.write(chunk)
+        return
 
-# --- TÂCHE DE FOND (Traitement lourd de la vidéo) ---
-def process_video_task(data: RenderRequest):
+    file_id = match.group(1)
+    session = requests.Session()
+    download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+    
+    response = session.get(download_url, stream=True)
+    
+    # Gestion du token de confirmation Google Drive pour les gros fichiers
+    token = None
+    for key, value in response.cookies.items():
+        if key.startswith('download_warning'):
+            token = value
+            break
+
+    if token:
+        download_url = f"https://drive.google.com/uc?export=download&confirm={token}&id={file_id}"
+        response = session.get(download_url, stream=True)
+
+    response.raise_for_status()
+    with open(destination, "wb") as f:
+        for chunk in response.iter_content(chunk_size=8192):
+            f.write(chunk)
+
+# --- TÂCHE DE FOND ---
+def process_video_task(data: RenderRequest, host_url: str):
     try:
-        # 1. Téléchargement des médias
-        img_direct_url = get_direct_drive_url(data.image_url)
-        audio_direct_url = get_direct_drive_url(data.audio_url)
+        print("=== DEBUT DU TRAITEMENT VIDEO ===", flush=True)
 
-        img_res = requests.get(img_direct_url)
-        audio_res = requests.get(audio_direct_url)
-
-        if img_res.status_code != 200 or audio_res.status_code != 200:
-            raise Exception("Impossible de télécharger l'image ou l'audio.")
-
-        with open("temp_image.jpg", "wb") as f:
-            f.write(img_res.content)
-        with open("temp_audio.mp3", "wb") as f:
-            f.write(audio_res.content)
+        # 1. Téléchargement sécurisé des médias
+        print("Téléchargement de l'image...", flush=True)
+        download_file_from_google_drive(data.image_url, "temp_image.jpg")
+        
+        print("Téléchargement de l'audio...", flush=True)
+        download_file_from_google_drive(data.audio_url, "temp_audio.mp3")
 
         # 2. Préparation des éléments
         audio_clip = AudioFileClip("temp_audio.mp3")
@@ -82,6 +103,7 @@ def process_video_task(data: RenderRequest):
 
         # 3. Génération des sous-titres
         if data.script_text:
+            print("Génération des sous-titres...", flush=True)
             words = data.script_text.split()
             chunk_size = 4
             chunks = [' '.join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
@@ -93,53 +115,65 @@ def process_video_task(data: RenderRequest):
                     sub_clip = (ImageClip(sub_arr)
                                 .set_start(idx * time_per_chunk)
                                 .set_duration(time_per_chunk)
-                                .set_position(('center', 1400))) # Placés vers le bas
+                                .set_position(('center', 1400)))
                     clips.append(sub_clip)
 
         # 4. Rendu final
+        print("Rendu final avec MoviePy...", flush=True)
         final_video = CompositeVideoClip(clips, size=(1080, 1920)).set_audio(audio_clip)
         output_filename = "output.mp4"
+        
         final_video.write_videofile(
             output_filename,
             fps=24,
             codec="libx264",
             audio_codec="aac",
             temp_audiofile="temp-audio.m4a",
-            remove_temp=True
+            remove_temp=True,
+            threads=1  # Limite l'usage CPU/RAM pour éviter les surcharges
         )
 
         audio_clip.close()
         final_video.close()
 
-        # 5. Envoi de la confirmation à Make via Webhook
+        print("=== RENDU TERMINE AVEC SUCCES ===", flush=True)
+
+        # 5. Envoi du lien vers Make via Webhook
         if data.webhook_url:
+            download_link = f"{host_url.rstrip('/')}/download"
             requests.post(data.webhook_url, json={
                 "status": "success",
                 "message": "Rendu vidéo terminé !",
+                "download_url": download_link,
                 "filename": output_filename
             })
 
     except Exception as e:
-        # Envoi de l'erreur à Make si le traitement échoue
+        error_msg = str(e)
+        print(f"!!! ERREUR RENDU VIDEO !!! : {error_msg}", flush=True)
+        traceback.print_exc()
+
+        # Envoi de l'erreur détaillée à Make
         if data.webhook_url:
             requests.post(data.webhook_url, json={
                 "status": "error",
-                "error": str(e)
+                "error": error_msg
             })
 
-# --- ENDPOINT RENDU (Réponse instantanée < 1s) ---
+# --- ENDPOINT RENDU ---
 @app.post("/render")
-def render_video(data: RenderRequest, background_tasks: BackgroundTasks):
-    # Lance la vidéo en arrière-plan
-    background_tasks.add_task(process_video_task, data)
+def render_video(data: RenderRequest, request: Request, background_tasks: BackgroundTasks):
+    # Récupère l'URL de base du serveur hébergé
+    host_url = str(request.base_url)
     
-    # Retourne immédiatement pour éviter le timeout (502 Bad Gateway)
+    background_tasks.add_task(process_video_task, data, host_url)
+    
     return {
         "status": "processing",
         "message": "Le rendu de la vidéo a été lancé en arrière-plan."
     }
 
-# --- ROUTE DE TÉLÉCHARMENT DE LA VIDÉO ---
+# --- ROUTE DE TÉLÉCHARGEMENT ---
 @app.get("/download")
 def download_video():
     output_filename = "output.mp4"
