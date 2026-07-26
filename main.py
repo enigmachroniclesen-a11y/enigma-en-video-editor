@@ -1,23 +1,32 @@
 import PIL.Image
 if not hasattr(PIL.Image, 'ANTIALIAS'):
     PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
+
 import os
 import re
 import requests
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from moviepy.editor import ImageClip, AudioFileClip, CompositeVideoClip
 
 app = FastAPI()
 
+# --- HEALTH CHECK (Résout le problème 405 / Cold Start sur Render) ---
+@app.api_route("/", methods=["GET", "HEAD"])
+async def health_check():
+    return {"status": "ok", "message": "Serveur de montage vidéo opérationnel !"}
+
+# --- MODÈLE DE DONNÉES ---
 class RenderRequest(BaseModel):
     image_url: str
     audio_url: str
     script_text: str = ""
+    webhook_url: str | None = None  # URL du Webhook Make pour la notification de fin
 
+# --- FONCTIONS UTILITAIRES ---
 def create_subtitle_image(text, size=(900, 200)):
     """Génère une image transparente avec le texte des sous-titres centré."""
     img = Image.new('RGBA', size, (0, 0, 0, 160)) # Fond semi-transparent
@@ -42,12 +51,8 @@ def get_direct_drive_url(url: str) -> str:
         return f"https://drive.google.com/uc?export=download&id={file_id}"
     return url
 
-@app.get("/")
-def home():
-    return {"status": "ok", "message": "Serveur de montage vidéo opérationnel !"}
-
-@app.post("/render")
-def render_video(data: RenderRequest):
+# --- TÂCHE DE FOND (Traitement lourd de la vidéo) ---
+def process_video_task(data: RenderRequest):
     try:
         # 1. Téléchargement des médias
         img_direct_url = get_direct_drive_url(data.image_url)
@@ -57,7 +62,7 @@ def render_video(data: RenderRequest):
         audio_res = requests.get(audio_direct_url)
 
         if img_res.status_code != 200 or audio_res.status_code != 200:
-            raise HTTPException(status_code=400, detail="Impossible de télécharger l'image ou l'audio.")
+            raise Exception("Impossible de télécharger l'image ou l'audio.")
 
         with open("temp_image.jpg", "wb") as f:
             f.write(img_res.content)
@@ -106,7 +111,38 @@ def render_video(data: RenderRequest):
         audio_clip.close()
         final_video.close()
 
-        return FileResponse(output_filename, media_type="video/mp4", filename="video.mp4")
+        # 5. Envoi de la confirmation à Make via Webhook
+        if data.webhook_url:
+            requests.post(data.webhook_url, json={
+                "status": "success",
+                "message": "Rendu vidéo terminé !",
+                "filename": output_filename
+            })
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # Envoi de l'erreur à Make si le traitement échoue
+        if data.webhook_url:
+            requests.post(data.webhook_url, json={
+                "status": "error",
+                "error": str(e)
+            })
+
+# --- ENDPOINT RENDU (Réponse instantanée < 1s) ---
+@app.post("/render")
+def render_video(data: RenderRequest, background_tasks: BackgroundTasks):
+    # Lance la vidéo en arrière-plan
+    background_tasks.add_task(process_video_task, data)
+    
+    # Retourne immédiatement pour éviter le timeout (502 Bad Gateway)
+    return {
+        "status": "processing",
+        "message": "Le rendu de la vidéo a été lancé en arrière-plan."
+    }
+
+# --- ROUTE DE TÉLÉCHARMENT DE LA VIDÉO ---
+@app.get("/download")
+def download_video():
+    output_filename = "output.mp4"
+    if os.path.exists(output_filename):
+        return FileResponse(output_filename, media_type="video/mp4", filename="video.mp4")
+    raise HTTPException(status_code=404, detail="Vidéo non trouvée.")
