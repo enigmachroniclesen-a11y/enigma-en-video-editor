@@ -28,8 +28,8 @@ class RenderRequest(BaseModel):
     webhook_url: str | None = None
 
 # --- FONCTIONS UTILITAIRES ---
-def create_subtitle_image(text, size=(680, 180)):
-    """Génère une image transparente avec le texte des sous-titres grand, jaune et en majuscules."""
+def create_subtitle_image(text, size=(700, 150)):
+    """Génère une image transparente avec le texte des sous-titres, ajusté pour mobile."""
     
     # Force le texte en majuscules pour une meilleure lisibilité mobile
     text = text.upper()
@@ -48,7 +48,8 @@ def create_subtitle_image(text, size=(680, 180)):
     
     for f_path in possible_fonts:
         try:
-            font = ImageFont.truetype(f_path, size=55)
+            # Taille réduite à 40 pour éviter les débordements
+            font = ImageFont.truetype(f_path, size=40)
             break
         except OSError:
             continue
@@ -64,8 +65,8 @@ def create_subtitle_image(text, size=(680, 180)):
     x = (size[0] - text_w) / 2
     y = (size[1] - text_h) / 2
     
-    # Contour noir épais pour assurer la lisibilité sur tout type de fond
-    stroke_w = 3
+    # Contour noir pour assurer la lisibilité
+    stroke_w = 2
     for adj_x in range(-stroke_w, stroke_w + 1):
         for adj_y in range(-stroke_w, stroke_w + 1):
             draw.text((x + adj_x, y + adj_y), text, fill=(0, 0, 0, 255), font=font)
@@ -141,17 +142,17 @@ def process_video_task(data: RenderRequest, host_url: str):
         if data.script_text:
             print("Génération des sous-titres grand format...", flush=True)
             words = data.script_text.split()
-            chunk_size = 4
+            chunk_size = 2 # Affichage de 2 mots max par groupe
             chunks = [' '.join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
             
             if chunks:
                 time_per_chunk = duration / len(chunks)
                 for idx, chunk in enumerate(chunks):
-                    sub_arr = create_subtitle_image(chunk, size=(680, 180))
+                    sub_arr = create_subtitle_image(chunk, size=(700, 150))
                     sub_clip = (ImageClip(sub_arr)
                                 .set_start(idx * time_per_chunk)
                                 .set_duration(time_per_chunk)
-                                .set_position(('center', 920)))
+                                .set_position(('center', 950)))
                     clips.append(sub_clip)
 
         # 5. Rendu final (720x1280, optimisé 512 MB RAM)
