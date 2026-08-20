@@ -144,14 +144,13 @@ def process_video_task(data: RenderRequest, host_url: str):
         background_video = concatenate_videoclips(image_clips, method="compose")
         clips = [background_video]
 
-        # 4. Traitement de la musique d'ambiance (format .wav recommandé)
-        music_file = "dark_ambient.wav"
-        if not os.path.exists(music_file):
-            music_file = "dark_ambient.mp3"  # Fallback si le wav n'a pas encore été mis à jour
+        # 4. Traitement de la musique d'ambiance
+        possible_music_files = ["dark_ambient.mp3.mp3", "dark_ambient.mp3", "dark_ambient.wav"]
+        music_file = next((f for f in possible_music_files if os.path.exists(f)), None)
 
         final_audio = voice_clip
 
-        if os.path.exists(music_file):
+        if music_file:
             try:
                 print(f"Ajout de la musique d'ambiance ({music_file})...", flush=True)
                 bg_music = AudioFileClip(music_file).volumex(0.12)  # Volume réduit à 12%
