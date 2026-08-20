@@ -101,6 +101,7 @@ def download_file_from_google_drive(url: str, destination: str):
 
 # --- TÂCHE DE FOND ---
 def process_video_task(data: RenderRequest, host_url: str):
+    bg_music = None
     try:
         print("=== DEBUT DU TRAITEMENT VIDEO ===", flush=True)
 
@@ -139,26 +140,30 @@ def process_video_task(data: RenderRequest, host_url: str):
                     .set_position("center"))
             image_clips.append(clip)
 
-        # Concaténation des 3 images
+        # Concaténation des images
         background_video = concatenate_videoclips(image_clips, method="compose")
         clips = [background_video]
 
         # 4. Traitement de la musique d'ambiance
         music_file = "dark_ambient.mp3"
+        final_audio = voice_clip
+
         if os.path.exists(music_file):
-            print("Ajout de la musique d'ambiance...", flush=True)
-            bg_music = AudioFileClip(music_file).volumex(0.12) # Volume réduit à 12%
+            try:
+                print("Ajout de la musique d'ambiance...", flush=True)
+                bg_music = AudioFileClip(music_file).volumex(0.12)  # Volume réduit à 12%
 
-            if bg_music.duration < total_duration:
-                bg_music = bg_music.loop(duration=total_duration)
-            else:
-                bg_music = bg_music.subclip(0, total_duration)
+                if bg_music.duration < total_duration:
+                    bg_music = bg_music.loop(duration=total_duration)
+                else:
+                    bg_music = bg_music.subclip(0, total_duration)
 
-            bg_music = bg_music.audio_fadeout(2)
-            final_audio = CompositeAudioClip([voice_clip, bg_music])
+                bg_music = bg_music.audio_fadeout(2)
+                final_audio = CompositeAudioClip([voice_clip, bg_music])
+            except Exception as audio_err:
+                print(f"Avertissement : Erreur avec la musique d'ambiance ({audio_err}). Traitement avec la voix seule.", flush=True)
         else:
             print("Musique d'ambiance non trouvée, conservation de la voix off seule.", flush=True)
-            final_audio = voice_clip
 
         # 5. Génération des sous-titres grand format
         if data.script_text:
@@ -193,7 +198,10 @@ def process_video_task(data: RenderRequest, host_url: str):
             threads=1
         )
 
+        # Nettoyage des objets en mémoire
         voice_clip.close()
+        if bg_music:
+            bg_music.close()
         final_video.close()
 
         print("=== RENDU TERMINE AVEC SUCCES ===", flush=True)
