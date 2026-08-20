@@ -34,36 +34,36 @@ def create_subtitle_image(text, size=(700, 150)):
     text = text.upper()
     img = Image.new('RGBA', size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    
+
     font = None
     possible_fonts = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", # Linux / Render
         "/System/Library/Fonts/HelveticaNeue.ttc",              # MacOS
         "arial.ttf"                                            # Windows
     ]
-    
+
     for f_path in possible_fonts:
         try:
             font = ImageFont.truetype(f_path, size=40)
             break
         except OSError:
             continue
-            
+
     if font is None:
         font = ImageFont.load_default()
 
     bbox = draw.textbbox((0, 0), text, font=font)
     text_w = bbox[2] - bbox[0]
     text_h = bbox[3] - bbox[1]
-    
+
     x = (size[0] - text_w) / 2
     y = (size[1] - text_h) / 2
-    
+
     stroke_w = 2
     for adj_x in range(-stroke_w, stroke_w + 1):
         for adj_y in range(-stroke_w, stroke_w + 1):
             draw.text((x + adj_x, y + adj_y), text, fill=(0, 0, 0, 255), font=font)
-    
+
     draw.text((x, y), text, fill=(255, 215, 0, 255), font=font)
     return np.array(img)
 
@@ -81,9 +81,9 @@ def download_file_from_google_drive(url: str, destination: str):
     file_id = match.group(1)
     session = requests.Session()
     download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-    
+
     response = session.get(download_url, stream=True)
-    
+
     token = None
     for key, value in response.cookies.items():
         if key.startswith('download_warning'):
@@ -144,13 +144,16 @@ def process_video_task(data: RenderRequest, host_url: str):
         background_video = concatenate_videoclips(image_clips, method="compose")
         clips = [background_video]
 
-        # 4. Traitement de la musique d'ambiance
-        music_file = "dark_ambient.mp3"
+        # 4. Traitement de la musique d'ambiance (format .wav recommandé)
+        music_file = "dark_ambient.wav"
+        if not os.path.exists(music_file):
+            music_file = "dark_ambient.mp3"  # Fallback si le wav n'a pas encore été mis à jour
+
         final_audio = voice_clip
 
         if os.path.exists(music_file):
             try:
-                print("Ajout de la musique d'ambiance...", flush=True)
+                print(f"Ajout de la musique d'ambiance ({music_file})...", flush=True)
                 bg_music = AudioFileClip(music_file).volumex(0.12)  # Volume réduit à 12%
 
                 if bg_music.duration < total_duration:
@@ -171,7 +174,7 @@ def process_video_task(data: RenderRequest, host_url: str):
             words = data.script_text.split()
             chunk_size = 2
             chunks = [' '.join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
-            
+
             if chunks:
                 time_per_chunk = total_duration / len(chunks)
                 for idx, chunk in enumerate(chunks):
@@ -182,17 +185,19 @@ def process_video_task(data: RenderRequest, host_url: str):
                                 .set_position(('center', 950)))
                     clips.append(sub_clip)
 
-        # 6. Rendu final
+        # 6. Rendu final optimisé pour la RAM sur Render
         print("Rendu final avec MoviePy...", flush=True)
         final_video = CompositeVideoClip(clips, size=(720, 1280)).set_audio(final_audio)
         output_filename = "output.mp4"
-        
+
         final_video.write_videofile(
             output_filename,
             fps=24,
             codec="libx264",
             audio_codec="aac",
             preset="ultrafast",
+            bitrate="2000k",
+            ffmpeg_params=["-crf", "28", "-pix_fmt", "yuv420p"],
             temp_audiofile="temp-audio.m4a",
             remove_temp=True,
             threads=1
