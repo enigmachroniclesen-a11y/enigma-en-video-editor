@@ -153,7 +153,7 @@ def process_video_task(data: RenderRequest, host_url: str):
         if music_file:
             try:
                 print(f"Ajout de la musique d'ambiance ({music_file})...", flush=True)
-                bg_music = AudioFileClip(music_file).volumex(0.12)  # Volume réduit à 12%
+                bg_music = AudioFileClip(music_file).volumex(0.06)  # Volume ajusté à 6%
 
                 if bg_music.duration < total_duration:
                     bg_music = bg_music.loop(duration=total_duration)
